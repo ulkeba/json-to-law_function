@@ -110,7 +110,7 @@ namespace JsonToSentinelFunction
                 client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
                 var content = new StringContent(payload, System.Text.Encoding.UTF8, "application/json");
                 var response = client.PostAsync(ingestionEndpoint, content);
-                response.Result.EnsureSuccessStatusCode().ToString();
+                log.LogInformation($"Result code is {response.Result.EnsureSuccessStatusCode().ToString()}...");
             }
             catch (Exception ex)
             {
