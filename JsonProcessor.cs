@@ -18,12 +18,20 @@ namespace JsonToSentinelFunction
     public class JsonProcessor
     {
         private static Lazy<string> lazyLogIngestionEndpoint = new Lazy<string>(InitializeLogIngestionEndpoint);
+        private static Lazy<string> lazyMessageFormat = new Lazy<string>(InitializeMessageFormat);
 
         private static string InitializeLogIngestionEndpoint()
         {
             string retVal = Environment.GetEnvironmentVariable("LOG_INGESTION_ENDPOINT");
             if (retVal == null)
                 throw new Exception("LOG_INGESTION_ENDPOINT must be specified.");
+            return retVal;
+        }
+        private static string InitializeMessageFormat()
+        {
+            string retVal = Environment.GetEnvironmentVariable("MESSAGE_FORMAT");
+            if (retVal == null)
+                throw new Exception("MESSAGE_FORMAT must be specified.");
             return retVal;
         }
 
@@ -35,10 +43,29 @@ namespace JsonToSentinelFunction
             var data = eventHubMessage;
             log.LogInformation($"C# Event hub trigger function Processed event :{data}");
 
-            //TODO: More careful filtering (see https://learn.microsoft.com/en-us/azure/storage/blobs/storage-blob-event-overview).
             var jsonParsed = JsonNode.Parse(data);
-            if ("PutBlob".Equals(jsonParsed["api"].GetValue<string>())) {
-                string blobUrl = jsonParsed["url"].GetValue<string>();
+            if (jsonParsed is JsonArray)
+                foreach (var item in jsonParsed.AsArray())
+                    ProcessEvent(item, log);
+            else
+                ProcessEvent(jsonParsed, log);
+            
+        }
+
+        private void ProcessEvent(JsonNode jsonParsed, ILogger log)
+        {
+            //TODO: More careful filtering (see https://learn.microsoft.com/en-us/azure/storage/blobs/storage-blob-event-overview).
+            JsonNode payload;
+            if ("EventGridSchema_in_EventHub".Equals(lazyMessageFormat.Value)) {
+                payload =jsonParsed["data"];
+            } else if ("EventGridSchema".Equals(lazyMessageFormat.Value)) {
+                payload = jsonParsed;                   
+            } else {
+                throw new Exception($"Unknown message format {lazyMessageFormat.Value}");
+            }
+
+            if ("PutBlob".Equals(payload["api"].GetValue<string>())) {
+                string blobUrl = payload["url"].GetValue<string>();
                 string blobContent = GetBlobContent(blobUrl, log);
                 log.LogInformation($"Read blob {blobUrl}; content is: {blobContent}");
 
