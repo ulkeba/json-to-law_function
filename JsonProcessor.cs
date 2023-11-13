@@ -17,21 +17,18 @@ namespace JsonToSentinelFunction
 {
     public class JsonProcessor
     {
-        private static Lazy<string> lazyLogIngestionEndpoint = new Lazy<string>(InitializeLogIngestionEndpoint);
-        private static Lazy<string> lazyMessageFormat = new Lazy<string>(InitializeMessageFormat);
+        private static Lazy<string> lazyDataFetcherTenantId = new Lazy<string>(InitializeFromEnvSetting("DataFetcherTenantId"));
+        private static Lazy<string> lazyDataFetcherClientId = new Lazy<string>(InitializeFromEnvSetting("DataFetcherClientId"));
+        private static Lazy<string> lazyDataFetcherClientSecret = new Lazy<string>(InitializeFromEnvSetting("DataFetcherClientSecret"));
 
-        private static string InitializeLogIngestionEndpoint()
+        private static Lazy<string> lazyLogIngestionEndpoint = new Lazy<string>(InitializeFromEnvSetting("LOG_INGESTION_ENDPOINT"));
+        private static Lazy<string> lazyMessageFormat = new Lazy<string>(InitializeFromEnvSetting("MESSAGE_FORMAT"));
+
+        private static string InitializeFromEnvSetting(string key)
         {
-            string retVal = Environment.GetEnvironmentVariable("LOG_INGESTION_ENDPOINT");
+            string retVal = Environment.GetEnvironmentVariable(key);
             if (retVal == null)
-                throw new Exception("LOG_INGESTION_ENDPOINT must be specified.");
-            return retVal;
-        }
-        private static string InitializeMessageFormat()
-        {
-            string retVal = Environment.GetEnvironmentVariable("MESSAGE_FORMAT");
-            if (retVal == null)
-                throw new Exception("MESSAGE_FORMAT must be specified.");
+                throw new Exception($"{key} must be specified.");
             return retVal;
         }
 
@@ -80,7 +77,7 @@ namespace JsonToSentinelFunction
             {
                 BlobClient client = new(
                     new Uri(blobUrl),
-                    new DefaultAzureCredential());
+                    new ClientSecretCredential(lazyDataFetcherTenantId.Value, lazyDataFetcherClientId.Value, lazyDataFetcherClientSecret.Value));
                 var v = client.DownloadContent();
 
                 var binaryStream = v.Value.Content.ToStream();
