@@ -29,7 +29,7 @@ namespace JsonToSentinelFunction
 
         [FunctionName("EventProcessor")]
         public void RunEventGridTrigger(
-            [EventHubTrigger("storage-events", Connection = "EventHubConnectionAppSetting")] string eventHubMessage,
+            [EventHubTrigger("storage-events", Connection = "EventHubConnectionAppSetting", ConsumerGroup = "to-function")] string eventHubMessage,
             ILogger log)
         {
             var data = eventHubMessage;
