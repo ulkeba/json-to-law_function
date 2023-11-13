@@ -4,9 +4,8 @@ using System.Net.Http;
 using System.Net.Http.Headers;
 using Microsoft.Azure.WebJobs;
 using Microsoft.Azure.WebJobs.Host;
-using Microsoft.Azure.WebJobs.Extensions.EventGrid;
 using Microsoft.Extensions.Logging;
-using Azure.Messaging.EventGrid;
+using Azure.Messaging.EventHubs;
 using Azure.Identity;
 using Azure.Storage.Blobs;
 using Azure.Storage.Blobs.Models;
@@ -29,12 +28,15 @@ namespace JsonToSentinelFunction
         }
 
         [FunctionName("EventProcessor")]
-        public void RunEventGridTrigger([EventGridTrigger] EventGridEvent eventGridEvent, ILogger log)
+        public void RunEventGridTrigger(
+            [EventHubTrigger("storage-events", Connection = "EventHubConnectionAppSetting")] string eventHubMessage,
+            ILogger log)
         {
-            log.LogInformation($"C# Event grid trigger function Processed event :{eventGridEvent.Data.ToString()}");
+            var data = eventHubMessage;
+            log.LogInformation($"C# Event hub trigger function Processed event :{data}");
 
             //TODO: More careful filtering (see https://learn.microsoft.com/en-us/azure/storage/blobs/storage-blob-event-overview).
-            var jsonParsed = JsonNode.Parse(eventGridEvent.Data);
+            var jsonParsed = JsonNode.Parse(data);
             if ("PutBlob".Equals(jsonParsed["api"].GetValue<string>())) {
                 string blobUrl = jsonParsed["url"].GetValue<string>();
                 string blobContent = GetBlobContent(blobUrl, log);
