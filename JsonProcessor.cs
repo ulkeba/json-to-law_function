@@ -1,17 +1,18 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.IO.Compression;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using Microsoft.Azure.WebJobs;
-using Microsoft.Azure.WebJobs.Host;
 using Microsoft.Extensions.Logging;
-using Azure.Messaging.EventHubs;
+using Azure.Core;
 using Azure.Identity;
 using Azure.Storage.Blobs;
-using Azure.Storage.Blobs.Models;
-using Azure.Storage.Blobs.Specialized;
-using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Threading;
+using System.Text;
+using System.Linq;
 
 namespace JsonToSentinelFunction
 {
@@ -21,14 +22,29 @@ namespace JsonToSentinelFunction
         private static Lazy<string> lazyDataFetcherClientId = new Lazy<string>(InitializeFromEnvSetting("DataFetcherClientId"));
         private static Lazy<string> lazyDataFetcherClientSecret = new Lazy<string>(InitializeFromEnvSetting("DataFetcherClientSecret"));
 
+        private static Lazy<string> lazyDataIngestorTenantId = new Lazy<string>(InitializeFromEnvSetting("DataIngestorTenantId", required: false));
+        private static Lazy<string> lazyDataIngestorClientId = new Lazy<string>(InitializeFromEnvSetting("DataIngestorClientId", required: false));
+        private static Lazy<string> lazyDataIngestorClientSecret = new Lazy<string>(InitializeFromEnvSetting("DataIngestorClientSecret", required: false));
+
         private static Lazy<string> lazyLogIngestionEndpoint = new Lazy<string>(InitializeFromEnvSetting("LOG_INGESTION_ENDPOINT"));
         private static Lazy<string> lazyMessageFormat = new Lazy<string>(InitializeFromEnvSetting("MESSAGE_FORMAT"));
+        private static Lazy<string> lazyTransmissionMode = new Lazy<string>(InitializeFromEnvSetting("TRANSMISSION_MODE", required: false));
+        private static Lazy<HashSet<string>> lazyPrefixFilter = new Lazy<HashSet<string>>(InitializePrefixFilter());
+        private static AccessToken? monitorToken = null;
 
-        private static string InitializeFromEnvSetting(string key)
+        private static string InitializeFromEnvSetting(string key, bool required = true)
         {
             string retVal = Environment.GetEnvironmentVariable(key);
-            if (retVal == null)
+            if (required && retVal == null)
                 throw new Exception($"{key} must be specified.");
+            return retVal;
+        }
+
+        private static HashSet<string> InitializePrefixFilter()
+        {
+            var retVal = new HashSet<string>();
+            var prefixFilterString = InitializeFromEnvSetting("PREFIX_FILTER");
+            prefixFilterString.Split(",").ToList().ForEach(x => retVal.Add(x.Trim()));
             return retVal;
         }
 
@@ -46,45 +62,108 @@ namespace JsonToSentinelFunction
                     ProcessEvent(item, log);
             else
                 ProcessEvent(jsonParsed, log);
-            
+
         }
 
         private void ProcessEvent(JsonNode jsonParsed, ILogger log)
         {
-            //TODO: More careful filtering (see https://learn.microsoft.com/en-us/azure/storage/blobs/storage-blob-event-overview).
             JsonNode payload;
-            if ("EventGridSchema_in_EventHub".Equals(lazyMessageFormat.Value)) {
-                payload =jsonParsed["data"];
-            } else if ("EventGridSchema".Equals(lazyMessageFormat.Value)) {
-                payload = jsonParsed;                   
-            } else {
+            if ("EventGridSchema_in_EventHub".Equals(lazyMessageFormat.Value))
+            {
+                payload = jsonParsed["data"];
+            }
+            else if ("EventGridSchema".Equals(lazyMessageFormat.Value))
+            {
+                payload = jsonParsed;
+            }
+            else
+            {
                 throw new Exception($"Unknown message format {lazyMessageFormat.Value}");
             }
 
-            if ("PutBlob".Equals(payload["api"].GetValue<string>())) {
+            if ("PutBlob".Equals(payload["api"].GetValue<string>()))
+            {
                 string blobUrl = payload["url"].GetValue<string>();
-                string blobContent = GetBlobContent(blobUrl, log);
-                log.LogInformation($"Read blob {blobUrl}; content is: {blobContent}");
+                Uri blobUri = new Uri(blobUrl);
 
-                String accessToken = GetMonitorToken();
-                PostToMonitor(lazyLogIngestionEndpoint.Value, accessToken, blobContent, log);
+                var filtered = lazyPrefixFilter.Value.Any(x => blobUri.AbsolutePath.StartsWith(x));
+                if (filtered)
+                {
+                    if ("application/octet-stream".Equals(payload["contentType"].GetValue<string>()))
+                    {
+                        log.LogInformation($"Blob {blobUrl} is of type application/octet-stream. Checking for file extension...");
+                        if (blobUrl.EndsWith(".json.gz"))
+                        {
+                            log.LogInformation($"Blob {blobUrl} is of type application/octet-stream and has a .json.gz extension. Extracting (and assuming it's in JSONLines format)...");
+                            var blobStream = GetBlobStream(blobUrl, log);
+                            using var decompressor = new GZipStream(blobStream, CompressionMode.Decompress);
+                            using var reader = new StreamReader(decompressor);
+
+                            var line = reader.ReadLine();
+                            StringBuilder myStringBuilder = new StringBuilder();
+                            myStringBuilder.Append('[');
+                            while (line != null)
+                            {
+                                if (myStringBuilder.Length > 1)
+                                    myStringBuilder.Append(", ");
+                                myStringBuilder.Append(line);
+                                line = reader.ReadLine();
+                            }
+                            myStringBuilder.Append(']');
+                            StreamToMonitor(new StringContent(myStringBuilder.ToString(), System.Text.Encoding.UTF8, "application/json"), log);
+                        }
+                        else
+                        {
+                            log.LogInformation($"Blob {blobUrl} is of type application/octet-stream but does not have a .json.gz extension. Skipping...");
+                        }
+                    }
+                    else if ("application/json".Equals(payload["contentType"].GetValue<string>()))
+                    {
+                        log.LogInformation($"Blob {blobUrl} is of type application/json. Checking for file extension...");
+                        if (blobUrl.EndsWith(".json"))
+                        {
+                            log.LogInformation($"Blob {blobUrl} is of type application/json and has a .json extension. Processing...");
+                            var blobStream = GetBlobStream(blobUrl, log);
+                            if (!string.IsNullOrEmpty(lazyTransmissionMode.Value) && "read_full".Equals(lazyTransmissionMode.Value.ToLower()))
+                            {
+                                log.LogInformation($"TRANSMISSION_MODE is set to read_full. Reading full content of blob {blobUrl}...");
+                                string blobContent = GetContentFromStream(blobStream, log);
+                                log.LogInformation($"Read blob {blobUrl}; content is: {blobContent}");
+                                StreamToMonitor(new StringContent(blobContent, System.Text.Encoding.UTF8, "application/json"), log);
+                            }
+                            else
+                            {
+                                log.LogInformation($"TRANSMISSION_MODE is not set to read_full. Streaming content of {blobUrl} directly...");
+                                StreamToMonitor(new StreamContent(blobStream), log);
+                            }
+
+                        }
+                        else
+                        {
+                            log.LogInformation($"Blob {blobUrl} is of type application/json but does not have a .json extension. Skipping...");
+                        }
+
+                    }
+                    else
+                    {
+                        log.LogInformation($"Blob {blobUrl} is of type {payload["contentType"].GetValue<string>()}. Skipping...");
+                    }
+                }
+                else
+                {
+                    log.LogInformation($"Blob {blobUrl} does not match prefix filter {string.Join(',', lazyPrefixFilter.Value)}. Skipping...");
+                }
             }
         }
 
-        public string GetBlobContent(string blobUrl, ILogger log)
+        private Stream GetBlobStream(string blobUrl, ILogger log)
         {
             try
             {
-                BlobClient client = new(
+                BlobClient blobClient = new(
                     new Uri(blobUrl),
                     new ClientSecretCredential(lazyDataFetcherTenantId.Value, lazyDataFetcherClientId.Value, lazyDataFetcherClientSecret.Value));
-                var v = client.DownloadContent();
-
-                var binaryStream = v.Value.Content.ToStream();
-                // TODO Error handling in case of different encoding. 
-                StreamReader reader = new StreamReader(binaryStream, System.Text.Encoding.UTF8);
-                string text = reader.ReadToEnd();
-                return text;
+                return blobClient.OpenRead();
             }
             catch (Exception ex)
             {
@@ -93,24 +172,27 @@ namespace JsonToSentinelFunction
             }
         }
 
-        //TODO Cache the token and renew on demand.
-        private string GetMonitorToken() {
-            var credential = new Azure.Identity.DefaultAzureCredential();
-            var token = credential.GetToken(new Azure.Core.TokenRequestContext(new[] { "https://monitor.azure.com//.default" }));
-            return token.Token;
+        private string GetContentFromStream(Stream stream, ILogger log)
+        {
+            // TODO Error handling in case of different encoding. 
+            StreamReader reader = new StreamReader(stream, System.Text.Encoding.UTF8);
+            string text = reader.ReadToEnd();
+            return text;
         }
 
-        private void PostToMonitor(string ingestionEndpoint, string accessToken, string payload, ILogger log)
+        private void StreamToMonitor(HttpContent content, ILogger log)
         {
-            //TODO Proper Exception handling / retrying / dead-lettering.
             try
             {
-                log.LogInformation($"Sending payload to {ingestionEndpoint}...");
-                HttpClient client = new HttpClient();
-                client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
-                var content = new StringContent(payload, System.Text.Encoding.UTF8, "application/json");
-                var response = client.PostAsync(ingestionEndpoint, content);
-                log.LogInformation($"Result code is {response.Result.EnsureSuccessStatusCode().ToString()}...");
+                string accessToken = GetMonitorToken(log);
+                HttpClient monitorHttpClient = new HttpClient();
+                monitorHttpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+                content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
+
+                log.LogInformation($"Sending payload to {lazyLogIngestionEndpoint.Value}...");
+                var response = monitorHttpClient.PostAsync(lazyLogIngestionEndpoint.Value, content);
+                log.LogInformation($"Result code is {response.Result.EnsureSuccessStatusCode()}...");
+                response.Result.EnsureSuccessStatusCode();
             }
             catch (Exception ex)
             {
@@ -118,5 +200,32 @@ namespace JsonToSentinelFunction
                 throw;
             }
         }
+
+        private string GetMonitorToken(ILogger log)
+        {
+            if (!monitorToken.HasValue || monitorToken.Value.ExpiresOn < DateTimeOffset.UtcNow.AddMinutes(5))
+            {
+                log.LogInformation($"Getting new token for Azure Monitor...");
+                TokenCredential credential;
+                if (!string.IsNullOrEmpty(lazyDataIngestorClientSecret.Value)
+                    && !string.IsNullOrEmpty(lazyDataIngestorClientId.Value)
+                    && !string.IsNullOrEmpty(lazyDataIngestorTenantId.Value))
+                {
+                    credential = new ClientSecretCredential(lazyDataIngestorTenantId.Value, lazyDataIngestorClientId.Value, lazyDataIngestorClientSecret.Value);
+                }
+                else
+                {
+                    credential = new Azure.Identity.DefaultAzureCredential();
+                }
+                CancellationToken cancellationToken = new CancellationToken();
+                monitorToken = credential.GetToken(new Azure.Core.TokenRequestContext(new[] { "https://monitor.azure.com//.default" }), cancellationToken);
+            }
+            else
+            {
+                log.LogInformation($"Using cached token for Azure Monitor...");
+            }
+            return monitorToken.Value.Token;
+        }
+
     }
 }
