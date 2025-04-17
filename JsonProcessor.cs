@@ -160,9 +160,19 @@ namespace JsonToSentinelFunction
         {
             try
             {
-                BlobClient blobClient = new(
-                    new Uri(blobUrl),
-                    new ClientSecretCredential(lazyDataFetcherTenantId.Value, lazyDataFetcherClientId.Value, lazyDataFetcherClientSecret.Value));
+                TokenCredential credential;
+                if (!string.IsNullOrEmpty(lazyDataFetcherTenantId.Value)
+                    && !string.IsNullOrEmpty(lazyDataFetcherClientId.Value)
+                    && !string.IsNullOrEmpty(lazyDataFetcherClientSecret.Value))
+                {
+                    credential = new ClientSecretCredential(lazyDataFetcherTenantId.Value, lazyDataFetcherClientId.Value, lazyDataFetcherClientSecret.Value);
+                }
+                else
+                {
+                    credential = new Azure.Identity.DefaultAzureCredential();
+                }
+
+                BlobClient blobClient = new(new Uri(blobUrl), credential);
                 return blobClient.OpenRead();
             }
             catch (Exception ex)
