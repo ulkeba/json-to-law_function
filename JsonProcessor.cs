@@ -170,7 +170,7 @@ namespace JsonToSentinelFunction
                 }
                 else
                 {
-                    log.LogInformation($"Using DefaultAzureCredential(.) to get new token for Azure Monitor...");
+                    log.LogInformation($"Using DefaultAzureCredential(.) to get new token for Storage Account...");
                     credential = new Azure.Identity.DefaultAzureCredential();
                 }
 
