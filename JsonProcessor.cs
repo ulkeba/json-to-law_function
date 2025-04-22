@@ -165,10 +165,12 @@ namespace JsonToSentinelFunction
                     && !string.IsNullOrEmpty(lazyDataFetcherClientId.Value)
                     && !string.IsNullOrEmpty(lazyDataFetcherClientSecret.Value))
                 {
+                    log.LogInformation($"Using ClientSecretCredential(.) with Tenant ID {lazyDataFetcherTenantId.Value}, Client ID {lazyDataFetcherClientId.Value} and Client Secret to get new token for Storage Account...");
                     credential = new ClientSecretCredential(lazyDataFetcherTenantId.Value, lazyDataFetcherClientId.Value, lazyDataFetcherClientSecret.Value);
                 }
                 else
                 {
+                    log.LogInformation($"Using DefaultAzureCredential(.) to get new token for Azure Monitor...");
                     credential = new Azure.Identity.DefaultAzureCredential();
                 }
 
@@ -215,16 +217,17 @@ namespace JsonToSentinelFunction
         {
             if (!monitorToken.HasValue || monitorToken.Value.ExpiresOn < DateTimeOffset.UtcNow.AddMinutes(5))
             {
-                log.LogInformation($"Getting new token for Azure Monitor...");
                 TokenCredential credential;
                 if (!string.IsNullOrEmpty(lazyDataIngestorClientSecret.Value)
                     && !string.IsNullOrEmpty(lazyDataIngestorClientId.Value)
                     && !string.IsNullOrEmpty(lazyDataIngestorTenantId.Value))
                 {
+                    log.LogInformation($"Using ClientSecretCredential(.) with Tenant ID {lazyDataIngestorTenantId.Value}, Client ID {lazyDataIngestorClientId.Value} and Client Secret to get new token for Azure Monitor...");
                     credential = new ClientSecretCredential(lazyDataIngestorTenantId.Value, lazyDataIngestorClientId.Value, lazyDataIngestorClientSecret.Value);
                 }
                 else
                 {
+                    log.LogInformation($"Using DefaultAzureCredential(.) to get new token for Azure Monitor...");
                     credential = new Azure.Identity.DefaultAzureCredential();
                 }
                 CancellationToken cancellationToken = new CancellationToken();
