@@ -81,7 +81,8 @@ namespace JsonToSentinelFunction
                 throw new Exception($"Unknown message format {lazyMessageFormat.Value}");
             }
 
-            if ("PutBlob".Equals(payload["api"].GetValue<string>()))
+            if ("PutBlob".Equals(payload["api"].GetValue<string>())
+                || "PutBlockList".Equals(payload["api"].GetValue<string>()))
             {
                 string blobUrl = payload["url"].GetValue<string>();
                 Uri blobUri = new Uri(blobUrl);
