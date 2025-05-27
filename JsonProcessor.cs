@@ -32,6 +32,8 @@ namespace JsonToSentinelFunction
         private static Lazy<HashSet<string>> lazyPrefixFilter = new Lazy<HashSet<string>>(InitializePrefixFilter());
         private static AccessToken? monitorToken = null;
 
+        private static Lazy<int> lazyBatchSize = new Lazy<int>(() => 100);
+
         private static string InitializeFromEnvSetting(string key, bool required = true)
         {
             string retVal = Environment.GetEnvironmentVariable(key);
@@ -101,6 +103,8 @@ namespace JsonToSentinelFunction
                             using var reader = new StreamReader(decompressor);
 
                             var line = reader.ReadLine();
+                            var processedLines = 0;
+                            var batch = 0;
                             StringBuilder myStringBuilder = new StringBuilder();
                             myStringBuilder.Append('[');
                             while (line != null)
@@ -108,8 +112,24 @@ namespace JsonToSentinelFunction
                                 if (myStringBuilder.Length > 1)
                                     myStringBuilder.Append(", ");
                                 myStringBuilder.Append(line);
+                                processedLines++;
+
+                                if (processedLines % lazyBatchSize.Value == 0)
+                                {
+                                    log.LogInformation($"Processed {processedLines} lines from blob {blobUrl}. Sending batch {batch} to monitor...");
+
+                                    myStringBuilder.Append(']');
+                                    StreamToMonitor(new StringContent(myStringBuilder.ToString(), System.Text.Encoding.UTF8, "application/json"), log);
+
+                                    batch++;
+                                    myStringBuilder = new StringBuilder();
+                                    myStringBuilder.Append('[');
+                                }
+
                                 line = reader.ReadLine();
                             }
+                            log.LogInformation($"Processed {processedLines} lines from blob {blobUrl}. Sending final batch {batch} to monitor...");
+
                             myStringBuilder.Append(']');
                             StreamToMonitor(new StringContent(myStringBuilder.ToString(), System.Text.Encoding.UTF8, "application/json"), log);
                         }
