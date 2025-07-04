@@ -4,7 +4,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Net.Http;
 using System.Net.Http.Headers;
-using Microsoft.Azure.WebJobs;
+using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.Logging;
 using Azure.Core;
 using Azure.Identity;
@@ -50,10 +50,16 @@ namespace JsonToSentinelFunction
             return retVal;
         }
 
-        [FunctionName("EventProcessor")]
+        private readonly ILogger<JsonProcessor> log;
+        
+        public JsonProcessor(ILogger<JsonProcessor> logger)
+        {
+            log = logger;
+        }
+
+        [Function("EventProcessor")]
         public void RunEventGridTrigger(
-            [EventHubTrigger("storage-events", Connection = "EventHubConnectionAppSetting", ConsumerGroup = "to-function")] string eventHubMessage,
-            ILogger log)
+            [EventHubTrigger("storage-events", Connection = "EventHubConnectionAppSetting", ConsumerGroup = "to-function", IsBatched = false)] string eventHubMessage)
         {
             var data = eventHubMessage;
             log.LogInformation($"C# Event hub trigger function Processed event :{data}");
@@ -61,13 +67,13 @@ namespace JsonToSentinelFunction
             var jsonParsed = JsonNode.Parse(data);
             if (jsonParsed is JsonArray)
                 foreach (var item in jsonParsed.AsArray())
-                    ProcessEvent(item, log);
+                    ProcessEvent(item);
             else
-                ProcessEvent(jsonParsed, log);
+                ProcessEvent(jsonParsed);
 
         }
 
-        private void ProcessEvent(JsonNode jsonParsed, ILogger log)
+        private void ProcessEvent(JsonNode jsonParsed)
         {
             JsonNode payload;
             if ("EventGridSchema_in_EventHub".Equals(lazyMessageFormat.Value))
@@ -98,7 +104,7 @@ namespace JsonToSentinelFunction
                         if (blobUrl.EndsWith(".json.gz"))
                         {
                             log.LogInformation($"Blob {blobUrl} is of type application/octet-stream and has a .json.gz extension. Extracting (and assuming it's in JSONLines format)...");
-                            var blobStream = GetBlobStream(blobUrl, log);
+                            var blobStream = GetBlobStream(blobUrl);
                             using var decompressor = new GZipStream(blobStream, CompressionMode.Decompress);
                             using var reader = new StreamReader(decompressor);
 
@@ -119,7 +125,7 @@ namespace JsonToSentinelFunction
                                     log.LogInformation($"Processed {processedLines} lines from blob {blobUrl}. Sending batch {batch} to monitor...");
 
                                     myStringBuilder.Append(']');
-                                    StreamToMonitor(new StringContent(myStringBuilder.ToString(), System.Text.Encoding.UTF8, "application/json"), log);
+                                    StreamToMonitor(new StringContent(myStringBuilder.ToString(), System.Text.Encoding.UTF8, "application/json"));
 
                                     batch++;
                                     myStringBuilder = new StringBuilder();
@@ -131,7 +137,7 @@ namespace JsonToSentinelFunction
                             log.LogInformation($"Processed {processedLines} lines from blob {blobUrl}. Sending final batch {batch} to monitor...");
 
                             myStringBuilder.Append(']');
-                            StreamToMonitor(new StringContent(myStringBuilder.ToString(), System.Text.Encoding.UTF8, "application/json"), log);
+                            StreamToMonitor(new StringContent(myStringBuilder.ToString(), System.Text.Encoding.UTF8, "application/json"));
                         }
                         else
                         {
@@ -144,18 +150,18 @@ namespace JsonToSentinelFunction
                         if (blobUrl.EndsWith(".json"))
                         {
                             log.LogInformation($"Blob {blobUrl} is of type application/json and has a .json extension. Processing...");
-                            var blobStream = GetBlobStream(blobUrl, log);
+                            var blobStream = GetBlobStream(blobUrl);
                             if (!string.IsNullOrEmpty(lazyTransmissionMode.Value) && "read_full".Equals(lazyTransmissionMode.Value.ToLower()))
                             {
                                 log.LogInformation($"TRANSMISSION_MODE is set to read_full. Reading full content of blob {blobUrl}...");
-                                string blobContent = GetContentFromStream(blobStream, log);
+                                string blobContent = GetContentFromStream(blobStream);
                                 log.LogInformation($"Read blob {blobUrl}; content is: {blobContent}");
-                                StreamToMonitor(new StringContent(blobContent, System.Text.Encoding.UTF8, "application/json"), log);
+                                StreamToMonitor(new StringContent(blobContent, System.Text.Encoding.UTF8, "application/json"));
                             }
                             else
                             {
                                 log.LogInformation($"TRANSMISSION_MODE is not set to read_full. Streaming content of {blobUrl} directly...");
-                                StreamToMonitor(new StreamContent(blobStream), log);
+                                StreamToMonitor(new StreamContent(blobStream));
                             }
 
                         }
@@ -177,7 +183,7 @@ namespace JsonToSentinelFunction
             }
         }
 
-        private Stream GetBlobStream(string blobUrl, ILogger log)
+        private Stream GetBlobStream(string blobUrl)
         {
             try
             {
@@ -205,7 +211,7 @@ namespace JsonToSentinelFunction
             }
         }
 
-        private string GetContentFromStream(Stream stream, ILogger log)
+        private string GetContentFromStream(Stream stream)
         {
             // TODO Error handling in case of different encoding. 
             StreamReader reader = new StreamReader(stream, System.Text.Encoding.UTF8);
@@ -213,11 +219,11 @@ namespace JsonToSentinelFunction
             return text;
         }
 
-        private void StreamToMonitor(HttpContent content, ILogger log)
+        private void StreamToMonitor(HttpContent content)
         {
             try
             {
-                string accessToken = GetMonitorToken(log);
+                string accessToken = GetMonitorToken();
                 HttpClient monitorHttpClient = new HttpClient();
                 monitorHttpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
                 content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
@@ -234,7 +240,7 @@ namespace JsonToSentinelFunction
             }
         }
 
-        private string GetMonitorToken(ILogger log)
+        private string GetMonitorToken()
         {
             if (!monitorToken.HasValue || monitorToken.Value.ExpiresOn < DateTimeOffset.UtcNow.AddMinutes(5))
             {
