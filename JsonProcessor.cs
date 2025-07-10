@@ -6,6 +6,7 @@ using System.Net.Http;
 using System.Net.Http.Headers;
 using Microsoft.Azure.WebJobs;
 using Microsoft.Extensions.Logging;
+using Azure.Messaging.EventHubs.Consumer;
 using Azure.Core;
 using Azure.Identity;
 using Azure.Storage.Blobs;
@@ -53,10 +54,33 @@ namespace JsonToSentinelFunction
         [FunctionName("EventProcessor")]
         public void RunEventGridTrigger(
             [EventHubTrigger("storage-events", Connection = "EventHubConnectionAppSetting", ConsumerGroup = "to-function")] string eventHubMessage,
+            DateTime enqueuedTimeUtc,
+            Int64 sequenceNumber,
+            string offset,
+            PartitionContext partitionContext,
             ILogger log)
         {
+
             var data = eventHubMessage;
-            log.LogInformation($"C# Event hub trigger function Processed event :{data}");
+            log.LogInformation($"C# Event hub trigger function processed event (Offset: {offset}) :{data}");
+            try
+            {    
+                var logRecord = new
+                {
+                    EventEnqueuedTimeUtc = enqueuedTimeUtc,
+                    EventSequenceNumber = sequenceNumber,
+                    EventOffset = offset,
+                    EventPartitionId = partitionContext.PartitionId,
+                    TriggerInvokedTimeUtc = DateTime.UtcNow,
+                    TimeSinceEnqueued = DateTime.UtcNow - enqueuedTimeUtc,
+                    EventPayload = eventHubMessage,
+                };
+                log.LogInformation(System.Text.Json.JsonSerializer.Serialize(logRecord));
+            } catch (Exception ex)
+            {
+                log.LogError(ex, $"Error creating detailed log record for event hub message: {ex.Message}");
+                throw;
+            }
 
             var jsonParsed = JsonNode.Parse(data);
             if (jsonParsed is JsonArray)
@@ -149,7 +173,6 @@ namespace JsonToSentinelFunction
                             {
                                 log.LogInformation($"TRANSMISSION_MODE is set to read_full. Reading full content of blob {blobUrl}...");
                                 string blobContent = GetContentFromStream(blobStream, log);
-                                log.LogInformation($"Read blob {blobUrl}; content is: {blobContent}");
                                 StreamToMonitor(new StringContent(blobContent, System.Text.Encoding.UTF8, "application/json"), log);
                             }
                             else
