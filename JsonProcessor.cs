@@ -6,6 +6,7 @@ using System.Net.Http;
 using System.Net.Http.Headers;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.Logging;
+using Azure.Messaging.EventHubs;
 using Azure.Messaging.EventHubs.Consumer;
 using Azure.Core;
 using Azure.Identity;
@@ -80,26 +81,21 @@ namespace JsonToSentinelFunction
 
         [Function("EventProcessor")]
         public void RunEventHubTrigger(
-            [EventHubTrigger("storage-events", Connection = "EventHubConnectionAppSetting", ConsumerGroup = "to-function", IsBatched = false)] string eventHubMessage,
-            DateTime enqueuedTimeUtc,
-            Int64 sequenceNumber,
-            string offset,
-            PartitionContext partitionContext)
+            [EventHubTrigger("storage-events", Connection = "EventHubConnectionAppSetting", ConsumerGroup = "to-function", IsBatched = false)] EventData eventData)
         {
-
-            var EventPartitionId = partitionContext.PartitionId;
-            var EventSequenceNumber = sequenceNumber;
-            var EventOffset = offset;
-            var EventEnqueuedTimeUtc = enqueuedTimeUtc;
+            var EventPartitionId = eventData.PartitionKey ?? "unknown";
+            var EventSequenceNumber = eventData.SequenceNumber;
+            var EventOffset = "unknown"; //eventData.Offset;
+            var EventEnqueuedTimeUtc = eventData.EnqueuedTime.DateTime;
             var TriggerInvokedTimeUtc = DateTime.UtcNow;
-            var TimeSinceEnqueued = DateTime.UtcNow - enqueuedTimeUtc;
-            var EventPayload = eventHubMessage;
+            var TimeSinceEnqueued = TriggerInvokedTimeUtc - EventEnqueuedTimeUtc;
+            var EventPayload = Encoding.UTF8.GetString(eventData.EventBody.ToArray());
 
             log.LogInformation("[{logMessageType}] C# Function triggered for event from EventHub. " +
                 "(message details: EventPartitionId: {EventPartitionId}, EventSequenceNumber: {EventSequenceNumber}, EventOffset: {EventOffset}, EventEnqueuedTimeUtc: {EventEnqueuedTimeUtc}, TriggerInvokedTimeUtc: {TriggerInvokedTimeUtc}, TimeSinceEnqueued: {TimeSinceEnqueued}, EventPayload: {EventPayload})",
                 LogMessageType.FunctionTriggered, EventPartitionId, EventSequenceNumber, EventOffset, EventEnqueuedTimeUtc, TriggerInvokedTimeUtc, TimeSinceEnqueued, EventPayload);
 
-            var jsonParsed = JsonNode.Parse(eventHubMessage);
+            var jsonParsed = JsonNode.Parse(EventPayload);
             if (jsonParsed is JsonArray)
                 foreach (var item in jsonParsed.AsArray())
                     ProcessEvent(item);
