@@ -81,7 +81,7 @@ namespace JsonToSentinelFunction
 
         [Function("EventProcessor")]
         public void RunEventHubTrigger(
-            [EventHubTrigger("storage-events", Connection = "EventHubConnectionAppSetting", ConsumerGroup = "to-function-3", IsBatched = false)] EventData eventData)
+            [EventHubTrigger("storage-events", Connection = "EventHubConnectionAppSetting", ConsumerGroup = "to-function-4", IsBatched = false)] EventData eventData)
         {
             var EventPartitionId = eventData.PartitionKey ?? "unknown";
             var EventSequenceNumber = eventData.SequenceNumber;
