@@ -33,7 +33,7 @@ namespace JsonToSentinelFunction
         private static Lazy<HashSet<string>> lazyPrefixFilter = new Lazy<HashSet<string>>(InitializePrefixFilter());
         private static AccessToken? monitorToken = null;
 
-        private static Lazy<int> lazyBatchSize = new Lazy<int>(() => 100);
+        private static Lazy<int> lazyBatchSize = new Lazy<int>(() => 90);
 
         private static string InitializeFromEnvSetting(string key, bool required = true)
         {
