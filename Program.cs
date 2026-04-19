@@ -3,6 +3,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using System.Linq;
+using JsonToSentinelFunction;
 
 var host = new HostBuilder()
     .ConfigureFunctionsWorkerDefaults()
@@ -25,5 +26,8 @@ var host = new HostBuilder()
        });
     })
     .Build();
+
+var logger = host.Services.GetRequiredService<ILogger<JsonProcessor>>();
+JsonProcessor.ValidateMonitorAuthenticationConfig(logger);
 
 host.Run();

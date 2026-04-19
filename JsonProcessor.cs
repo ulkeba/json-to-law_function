@@ -28,6 +28,7 @@ namespace JsonToSentinelFunction
         private static Lazy<string> lazyDataIngestorTenantId = new Lazy<string>(InitializeFromEnvSetting("DataIngestorTenantId", required: false));
         private static Lazy<string> lazyDataIngestorClientId = new Lazy<string>(InitializeFromEnvSetting("DataIngestorClientId", required: false));
         private static Lazy<string> lazyDataIngestorClientSecret = new Lazy<string>(InitializeFromEnvSetting("DataIngestorClientSecret", required: false));
+        private static Lazy<string> lazyDataIngestorUamiClientId = new Lazy<string>(InitializeFromEnvSetting("DataIngestorUamiClientId", required: false));
 
         private static Lazy<string> lazyLogIngestionEndpoint = new Lazy<string>(InitializeFromEnvSetting("LOG_INGESTION_ENDPOINT"));
         private static Lazy<string> lazyMessageFormat = new Lazy<string>(InitializeFromEnvSetting("MESSAGE_FORMAT"));
@@ -52,11 +53,136 @@ namespace JsonToSentinelFunction
             return retVal;
         }
 
+        private static MonitorAuthenticationType? resolvedMonitorAuthType = null;
+
+        public static MonitorAuthenticationType ValidateMonitorAuthenticationConfig(ILogger log)
+        {
+            var authTypeRaw = Environment.GetEnvironmentVariable("AZURE_MONITOR_AUTHENTICATION_TYPE");
+            var hasTenant = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DataIngestorTenantId"));
+            var hasClient = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DataIngestorClientId"));
+            var hasSecret = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DataIngestorClientSecret"));
+            var hasUamiClientId = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DataIngestorUamiClientId"));
+
+            MonitorAuthenticationType authType;
+
+            if (string.IsNullOrWhiteSpace(authTypeRaw))
+            {
+                // Backwards compatibility: infer auth type from legacy env vars
+                if (hasTenant && hasClient && hasSecret)
+                {
+                    authType = MonitorAuthenticationType.RemoteServicePrincipalAndSecret;
+                    log.LogInformation("[{logMessageType}] AZURE_MONITOR_AUTHENTICATION_TYPE is not set. " +
+                        "Inferred {authType} from legacy DataIngestor env vars for backwards compatibility.",
+                        LogMessageType.MonitorAuthenticationConfigValidation, authType);
+                }
+                else if (!hasTenant && !hasClient && !hasSecret)
+                {
+                    authType = MonitorAuthenticationType.Default;
+                    log.LogInformation("[{logMessageType}] AZURE_MONITOR_AUTHENTICATION_TYPE is not set. " +
+                        "No legacy DataIngestor env vars found, inferred {authType}.",
+                        LogMessageType.MonitorAuthenticationConfigValidation, authType);
+                }
+                else
+                {
+                    throw LogAndCreateException(log,
+                        "AZURE_MONITOR_AUTHENTICATION_TYPE is not set and the legacy DataIngestor env vars are partially configured. " +
+                        "Either set all three (DataIngestorTenantId, DataIngestorClientId, DataIngestorClientSecret) for backwards compatibility, " +
+                        "or set none and use AZURE_MONITOR_AUTHENTICATION_TYPE explicitly.");
+                }
+            }
+            else
+            {
+                var normalized = authTypeRaw.Trim().ToUpperInvariant();
+                authType = normalized switch
+                {
+                    "DEFAULT" => MonitorAuthenticationType.Default,
+                    "REMOTE_SERVICE_PRINCIPAL_AND_SECRET" => MonitorAuthenticationType.RemoteServicePrincipalAndSecret,
+                    "REMOTE_SERVICE_PRINCIPAL_WITH_FEDERATION_THROUGH_SAMI" => MonitorAuthenticationType.RemoteServicePrincipalWithFederationThroughSami,
+                    "REMOTE_SERVICE_PRINCIPAL_WITH_FEDERATION_THROUGH_UAMI" => MonitorAuthenticationType.RemoteServicePrincipalWithFederationThroughUami,
+                    _ => throw LogAndCreateException(log,
+                        $"Unknown AZURE_MONITOR_AUTHENTICATION_TYPE value: '{authTypeRaw}'. " +
+                        "Accepted values: DEFAULT, REMOTE_SERVICE_PRINCIPAL_AND_SECRET, " +
+                        "REMOTE_SERVICE_PRINCIPAL_WITH_FEDERATION_THROUGH_SAMI, REMOTE_SERVICE_PRINCIPAL_WITH_FEDERATION_THROUGH_UAMI.")
+                };
+                log.LogInformation("[{logMessageType}] AZURE_MONITOR_AUTHENTICATION_TYPE explicitly set to {authType}.",
+                    LogMessageType.MonitorAuthenticationConfigValidation, authType);
+            }
+
+            // Validate required env vars per auth type and reject unexpected ones
+            switch (authType)
+            {
+                case MonitorAuthenticationType.Default:
+                    if (hasTenant || hasClient || hasSecret || hasUamiClientId)
+                        throw LogAndCreateException(log,
+                            "AZURE_MONITOR_AUTHENTICATION_TYPE is DEFAULT but DataIngestor env vars are set. " +
+                            "Remove DataIngestorTenantId, DataIngestorClientId, DataIngestorClientSecret, and DataIngestorUamiClientId " +
+                            "or change the authentication type.");
+                    break;
+
+                case MonitorAuthenticationType.RemoteServicePrincipalAndSecret:
+                    if (!hasTenant || !hasClient || !hasSecret)
+                        throw LogAndCreateException(log,
+                            "AZURE_MONITOR_AUTHENTICATION_TYPE is REMOTE_SERVICE_PRINCIPAL_AND_SECRET but " +
+                            "DataIngestorTenantId, DataIngestorClientId, and DataIngestorClientSecret must all be set.");
+                    if (hasUamiClientId)
+                        throw LogAndCreateException(log,
+                            "AZURE_MONITOR_AUTHENTICATION_TYPE is REMOTE_SERVICE_PRINCIPAL_AND_SECRET but " +
+                            "DataIngestorUamiClientId is set. Remove it — it is only used with UAMI federation.");
+                    break;
+
+                case MonitorAuthenticationType.RemoteServicePrincipalWithFederationThroughSami:
+                    if (!hasTenant || !hasClient)
+                        throw LogAndCreateException(log,
+                            "AZURE_MONITOR_AUTHENTICATION_TYPE is REMOTE_SERVICE_PRINCIPAL_WITH_FEDERATION_THROUGH_SAMI but " +
+                            "DataIngestorTenantId and DataIngestorClientId must both be set.");
+                    if (hasSecret)
+                        throw LogAndCreateException(log,
+                            "AZURE_MONITOR_AUTHENTICATION_TYPE is REMOTE_SERVICE_PRINCIPAL_WITH_FEDERATION_THROUGH_SAMI but " +
+                            "DataIngestorClientSecret is set. Remove the secret — federation does not use a client secret.");
+                    if (hasUamiClientId)
+                        throw LogAndCreateException(log,
+                            "AZURE_MONITOR_AUTHENTICATION_TYPE is REMOTE_SERVICE_PRINCIPAL_WITH_FEDERATION_THROUGH_SAMI but " +
+                            "DataIngestorUamiClientId is set. Remove it — SAMI federation does not use a user-assigned managed identity.");
+                    break;
+
+                case MonitorAuthenticationType.RemoteServicePrincipalWithFederationThroughUami:
+                    if (!hasTenant || !hasClient || !hasUamiClientId)
+                        throw LogAndCreateException(log,
+                            "AZURE_MONITOR_AUTHENTICATION_TYPE is REMOTE_SERVICE_PRINCIPAL_WITH_FEDERATION_THROUGH_UAMI but " +
+                            "DataIngestorTenantId, DataIngestorClientId, and DataIngestorUamiClientId must all be set.");
+                    if (hasSecret)
+                        throw LogAndCreateException(log,
+                            "AZURE_MONITOR_AUTHENTICATION_TYPE is REMOTE_SERVICE_PRINCIPAL_WITH_FEDERATION_THROUGH_UAMI but " +
+                            "DataIngestorClientSecret is set. Remove the secret — federation does not use a client secret.");
+                    break;
+            }
+
+            resolvedMonitorAuthType = authType;
+            log.LogInformation("[{logMessageType}] Azure Monitor authentication configuration validated successfully. Using {authType}.",
+                LogMessageType.MonitorAuthenticationConfigValidation, authType);
+            return authType;
+        }
+
+        private static InvalidOperationException LogAndCreateException(ILogger log, string message)
+        {
+            log.LogError("[{logMessageType}] {message}",
+                LogMessageType.MonitorAuthenticationConfigValidation, message);
+            return new InvalidOperationException(message);
+        }
+
         private readonly ILogger<JsonProcessor> log;
         
         public JsonProcessor(ILogger<JsonProcessor> logger)
         {
             log = logger;
+        }
+
+        public enum MonitorAuthenticationType
+        {
+            Default,
+            RemoteServicePrincipalAndSecret,
+            RemoteServicePrincipalWithFederationThroughSami,
+            RemoteServicePrincipalWithFederationThroughUami
         }
 
         enum LogMessageType
@@ -69,7 +195,8 @@ namespace JsonToSentinelFunction
             AzureMonitorCredentials,
             SendingToAzureMonitor,
             SentAzureMonitor,
-            FunctionExecutionCompleted
+            FunctionExecutionCompleted,
+            MonitorAuthenticationConfigValidation
         }
 
         enum BlobProcssingStrategy
@@ -269,20 +396,38 @@ namespace JsonToSentinelFunction
             if (!monitorToken.HasValue || monitorToken.Value.ExpiresOn < DateTimeOffset.UtcNow.AddMinutes(5))
             {
                 TokenCredential credential;
-                if (!string.IsNullOrEmpty(lazyDataIngestorClientSecret.Value)
-                    && !string.IsNullOrEmpty(lazyDataIngestorClientId.Value)
-                    && !string.IsNullOrEmpty(lazyDataIngestorTenantId.Value))
+                switch (resolvedMonitorAuthType)
                 {
-                    log.LogInformation("[{logMessageType}] Using ClientSecretCredential(.) with Tenant ID {tenantId}, Client ID {clientId} and Client Secret to get new token for Azure Monitor...",
-                        LogMessageType.AzureMonitorCredentials, lazyDataIngestorTenantId.Value, lazyDataIngestorClientId.Value);
-                    credential = new ClientSecretCredential(lazyDataIngestorTenantId.Value, lazyDataIngestorClientId.Value, lazyDataIngestorClientSecret.Value);
+                    case MonitorAuthenticationType.Default:
+                        log.LogInformation("[{logMessageType}] Using DefaultAzureCredential(.) to get new token for Azure Monitor...",
+                            LogMessageType.AzureMonitorCredentials);
+                        credential = new DefaultAzureCredential();
+                        break;
+
+                    case MonitorAuthenticationType.RemoteServicePrincipalAndSecret:
+                        log.LogInformation("[{logMessageType}] Using ClientSecretCredential(.) with Tenant ID {tenantId}, Client ID {clientId} and Client Secret to get new token for Azure Monitor...",
+                            LogMessageType.AzureMonitorCredentials, lazyDataIngestorTenantId.Value, lazyDataIngestorClientId.Value);
+                        credential = new ClientSecretCredential(lazyDataIngestorTenantId.Value, lazyDataIngestorClientId.Value, lazyDataIngestorClientSecret.Value);
+                        break;
+
+                    case MonitorAuthenticationType.RemoteServicePrincipalWithFederationThroughSami:
+                        log.LogError("[{logMessageType}] Federation through SAMI is not yet implemented.",
+                            LogMessageType.AzureMonitorCredentials);
+                        throw new NotImplementedException(
+                            "Azure Monitor authentication via REMOTE_SERVICE_PRINCIPAL_WITH_FEDERATION_THROUGH_SAMI is not yet implemented.");
+
+                    case MonitorAuthenticationType.RemoteServicePrincipalWithFederationThroughUami:
+                        log.LogError("[{logMessageType}] Federation through UAMI is not yet implemented.",
+                            LogMessageType.AzureMonitorCredentials);
+                        throw new NotImplementedException(
+                            "Azure Monitor authentication via REMOTE_SERVICE_PRINCIPAL_WITH_FEDERATION_THROUGH_UAMI is not yet implemented.");
+
+                    default:
+                        throw new InvalidOperationException(
+                            $"Unexpected MonitorAuthenticationType: {resolvedMonitorAuthType}. " +
+                            "Was ValidateMonitorAuthenticationConfig() called at startup?");
                 }
-                else
-                {
-                    log.LogInformation("[{logMessageType}] Using DefaultAzureCredential(.) to get new token for Azure Monitor...",
-                        LogMessageType.AzureMonitorCredentials);
-                    credential = new Azure.Identity.DefaultAzureCredential();
-                }
+
                 CancellationToken cancellationToken = new CancellationToken();
                 monitorToken = credential.GetToken(new Azure.Core.TokenRequestContext(new[] { "https://monitor.azure.com//.default" }), cancellationToken);
             }
