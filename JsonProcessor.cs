@@ -417,10 +417,20 @@ namespace JsonToSentinelFunction
                             "Azure Monitor authentication via REMOTE_SERVICE_PRINCIPAL_WITH_FEDERATION_THROUGH_SAMI is not yet implemented.");
 
                     case MonitorAuthenticationType.RemoteServicePrincipalWithFederationThroughUami:
-                        log.LogError("[{logMessageType}] Federation through UAMI is not yet implemented.",
-                            LogMessageType.AzureMonitorCredentials);
-                        throw new NotImplementedException(
-                            "Azure Monitor authentication via REMOTE_SERVICE_PRINCIPAL_WITH_FEDERATION_THROUGH_UAMI is not yet implemented.");
+                        log.LogInformation("[{logMessageType}] Using ClientAssertionCredential with UAMI federation " +
+                            "(UAMI Client ID {uamiClientId}, Remote Tenant ID {tenantId}, Remote Client ID {clientId}) to get new token for Azure Monitor...",
+                            LogMessageType.AzureMonitorCredentials, lazyDataIngestorUamiClientId.Value, lazyDataIngestorTenantId.Value, lazyDataIngestorClientId.Value);
+                        var uamiCredential = new ManagedIdentityCredential(lazyDataIngestorUamiClientId.Value);
+                        credential = new ClientAssertionCredential(
+                            lazyDataIngestorTenantId.Value,
+                            lazyDataIngestorClientId.Value,
+                            async (cancellation) =>
+                            {
+                                var assertionToken = await uamiCredential.GetTokenAsync(
+                                    new TokenRequestContext(new[] { "api://AzureADTokenExchange/.default" }), cancellation);
+                                return assertionToken.Token;
+                            });
+                        break;
 
                     default:
                         throw new InvalidOperationException(
